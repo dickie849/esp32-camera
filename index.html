@@ -72,6 +72,9 @@
         let localStream = null;
         let mqttClient = null;
 
+        // 【新增 1】：用于在录音期间临时暂停图片流传输的全局标志位
+        let isVoiceActive = false; 
+
         // 初始化安全的 MQTT 连接 (EMQX WSS 端口 8084)
         const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
         const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
@@ -83,7 +86,6 @@
             startBtn.textContent = "启动安全传输";
             startBtn.disabled = false;
             
-            // 如果浏览器支持原生语音识别，则显示语音按钮
             if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                 voiceBtn.style.display = "block";
             } else {
@@ -95,10 +97,8 @@
             status.textContent = "连接中转服务器失败: " + err.message;
         });
 
-        // 监听摄像头切换事件
         cameraFacingSelect.addEventListener('change', async () => {
             if (isStreaming) {
-                // 如果正在发送，先停止，再用新摄像头重新启动
                 stopStreaming();
                 await startStreaming();
             }
@@ -115,12 +115,11 @@
         async function startStreaming() {
             const userId = userIdInput.value.trim();
             if (!userId) { alert("请输入用户ID！"); return; }
-
-            const facing = cameraFacingSelect.value; // 获取选择的摄像头方向
+            const facing = cameraFacingSelect.value;
 
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    video: { facingMode: facing }, // 动态指定前置或后置
+                    video: { facingMode: facing }, 
                     audio: false 
                 });
                 video.srcObject = stream;
@@ -158,6 +157,13 @@
 
         function captureAndUpload() {
             if (!isStreaming || !mqttClient.connected) return;
+
+            // 【核心修改 2】：如果用户正在进行语音录音，则完全跳过这一帧图片的捕获和网络上传
+            // 这能彻底清空网络传输通道，保证接下来生成的语音文字能够毫无阻碍、极其顺畅地秒达 ESP32
+            if (isVoiceActive) {
+                return; 
+            }
+            
             const ctx = canvas.getContext('2d');
             ctx.drawImage(video, 0, 0, 320, 240);
             
@@ -172,35 +178,37 @@
         }
 
         // =================================================================
-        // 【新增】：HTML5 浏览器原生语音识别 (Web Speech API)
+        // 【核心修改 3】：HTML5 浏览器原生语音识别（开关式点按 + 互斥图片发送）
         // =================================================================
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
-            recognition.continuous = false;   // 说话完毕后自动停止
-            recognition.interimResults = false; // 不输出临时中间结果
+            recognition.continuous = false;   
+            recognition.interimResults = false; 
             
-            // 语言设置：针对国外客户，可以设为 'en-US' (英文)；国内测试设为 'zh-CN' (中文)
+            // 国外客户可设为 'en-US' (英文)；国内测试设为 'zh-CN' (中文)
             recognition.lang = 'zh-CN'; 
 
+            let isRecording = false; // 用于维护“点一下开始，再点一下停止并发送”的开关状态
+
             recognition.onstart = () => {
-                voiceBtn.textContent = "正在聆听，请说话... (Listening)";
+                isVoiceActive = true; // 开启录音：立即暂停图片流发送，腾出网络通道
+                voiceBtn.textContent = "说完了，点击发送 (Stop & Send)";
                 voiceBtn.style.backgroundColor = "#ffc107";
-                status.textContent = "请对准麦克风说话...";
+                status.textContent = "正在录音（图片传输已暂停），说完了请再次点击按钮发送...";
             };
 
             recognition.onresult = (event) => {
                 const textResult = event.results[0][0].transcript;
                 status.textContent = `语音识别成功: "${textResult}"`;
                 
-                // 将翻译好的“文字”通过 MQTT 发送给 ESP32 (使用相同的主题前缀和 userId 关联)
                 const userId = userIdInput.value.trim();
                 const textTopic = `telefield/camera/text/${userId}`;
                 
                 if (mqttClient && mqttClient.connected) {
                     mqttClient.publish(textTopic, textResult, { qos: 0 }, (err) => {
                         if (!err) {
-                            status.textContent = `语音文字已发送："${textResult}"`;
+                            status.textContent = `发送成功："${textResult}"`;
                         }
                     });
                 }
@@ -208,18 +216,33 @@
 
             recognition.onerror = (event) => {
                 status.textContent = "语音识别出错: " + event.error;
-                resetVoiceBtn();
             };
 
+            // 无论录音是正常结束、报错结束还是由于超时自动结束，都会触发此回调
             recognition.onend = () => {
+                isRecording = false;
+                isVoiceActive = false; // 录音彻底结束：立刻恢复网页端图片流的自动循环发送
                 resetVoiceBtn();
             };
 
+            // 实现“点按开关式（Toggle）”交互逻辑
             voiceBtn.addEventListener('click', () => {
-                try {
-                    recognition.start();
-                } catch (e) {
-                    console.warn(e);
+                if (!isRecording) {
+                    try {
+                        recognition.start();
+                        isRecording = true;
+                    } catch (e) {
+                        console.warn(e);
+                    }
+                } else {
+                    try {
+                        // 强制停止监听：这会立刻命令浏览器停止麦克风采集，
+                        // 并立刻将截至目前的录音进行翻译，从而秒发出去
+                        recognition.stop(); 
+                        isRecording = false;
+                    } catch (e) {
+                        console.warn(e);
+                    }
                 }
             });
         }
@@ -228,6 +251,7 @@
             voiceBtn.textContent = "点击说话并发送 (Speak)";
             voiceBtn.style.backgroundColor = "#17a2b8";
         }
+    </script>
     </script>
 </body>
 </html>
