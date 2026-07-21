@@ -3,46 +3,57 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>云端图像传输客户端</title>
+    <title>多模态云端传输客户端</title>
     <!-- 引入公网标准的 MQTT 客户端库 -->
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
     <style>
         body { font-family: -apple-system, sans-serif; text-align: center; margin: 20px; background-color: #f4f6f9; }
         .container { max-width: 400px; margin: auto; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        
-        /* Logo 图片样式 */
-        .logo-img { 
-            max-width: 150px; 
-            height: auto; 
-            display: inline-block; 
-            margin: 10px auto 15px auto; 
-        }
-
+        .logo-img { max-width: 150px; height: auto; display: inline-block; margin: 10px auto 15px auto; }
         h2 { color: #333; margin-top: 5px; margin-bottom: 20px; font-size: 22px; }
         video { width: 100%; border-radius: 8px; margin-bottom: 12px; display: none; background: #000; }
-        input, select, button { width: 100%; padding: 12px; margin: 10px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
+        input, select, button { width: 100%; padding: 12px; margin: 8px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
         button { background-color: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; transition: background 0.2s; }
         button:hover { background-color: #0056b3; }
+        
+        /* 语音输入按钮样式 */
+        .voice-btn { background-color: #17a2b8; margin-top: 15px; }
+        .voice-btn:hover { background-color: #138496; }
+        .voice-btn:active { background-color: #117a8b; }
+        
         #status { font-weight: bold; color: #666; margin-top: 15px; font-size: 14px; }
         canvas { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- 【核心修改】：引入您上传的 Logo 图片，采用相对路径加载 -->
+        <!-- 1. 您的企业 Logo -->
         <img src="tf_logo.png" alt="Telefield Logo" class="logo-img">
         
-        <h2>云端图像传输客户端</h2>
+        <h2>多模态云端传输客户端</h2>
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
         <input type="text" id="userId" placeholder="输入用户ID" value="User_01">
+        
+        <!-- 2. 新增：摄像头方向选择 -->
+        <label style="display:block; text-align:left; font-size:14px; color:#555;">选择摄像头:</label>
+        <select id="cameraFacing">
+            <option value="environment" selected>后置摄像头 (Rear)</option>
+            <option value="user">前置摄像头 (Front)</option>
+        </select>
+
         <label style="display:block; text-align:left; font-size:14px; color:#555;">发送时间间隔:</label>
         <select id="interval">
             <option value="1000" selected>1000毫秒</option>
             <option value="2000">2000毫秒</option>
             <option value="5000">5000毫秒</option>
         </select>
+        
         <button id="startBtn" disabled>连接中，请稍候...</button>
+        
+        <!-- 3. 新增：语音识别发送按钮 -->
+        <button id="voiceBtn" class="voice-btn" style="display: none;">点击说话并发送 (Speak)</button>
+        
         <div id="status">正在建立与云端中转服务器的安全连接...</div>
     </div>
 
@@ -50,16 +61,18 @@
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
+        const voiceBtn = document.getElementById('voiceBtn');
         const status = document.getElementById('status');
         const userIdInput = document.getElementById('userId');
         const intervalSelect = document.getElementById('interval');
+        const cameraFacingSelect = document.getElementById('cameraFacing');
         
         let isStreaming = false;
         let timer = null;
         let localStream = null;
         let mqttClient = null;
 
-        // 初始化安全的 MQTT 连接 (通过 8084 端口的 WSS 协议，无跨域限制)
+        // 初始化安全的 MQTT 连接 (EMQX WSS 端口 8084)
         const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
         const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
         
@@ -69,10 +82,26 @@
             status.textContent = "已连接至云中转服务器，可以开始传输！";
             startBtn.textContent = "启动安全传输";
             startBtn.disabled = false;
+            
+            // 如果浏览器支持原生语音识别，则显示语音按钮
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                voiceBtn.style.display = "block";
+            } else {
+                console.warn("当前浏览器不支持 Web Speech API");
+            }
         });
 
         mqttClient.on('error', (err) => {
             status.textContent = "连接中转服务器失败: " + err.message;
+        });
+
+        // 监听摄像头切换事件
+        cameraFacingSelect.addEventListener('change', async () => {
+            if (isStreaming) {
+                // 如果正在发送，先停止，再用新摄像头重新启动
+                stopStreaming();
+                await startStreaming();
+            }
         });
 
         startBtn.addEventListener('click', async () => {
@@ -85,14 +114,15 @@
 
         async function startStreaming() {
             const userId = userIdInput.value.trim();
-            if (!userId) {
-                alert("请输入用户ID！");
-                return;
-            }
+            if (!userId) { alert("请输入用户ID！"); return; }
+
+            const facing = cameraFacingSelect.value; // 获取选择的摄像头方向
 
             try {
-                // 原生调用摄像头 (由于部署在 HTTPS 公网，任何手机都会秒弹授权)
-                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: facing }, // 动态指定前置或后置
+                    audio: false 
+                });
                 video.srcObject = stream;
                 video.style.display = "block";
                 localStream = stream;
@@ -128,27 +158,75 @@
 
         function captureAndUpload() {
             if (!isStreaming || !mqttClient.connected) return;
-            
             const ctx = canvas.getContext('2d');
             ctx.drawImage(video, 0, 0, 320, 240);
             
             canvas.toBlob((blob) => {
                 if (!blob) return;
-
-                // 将 Blob 转换为 ArrayBuffer (二进制数据)，直接通过 MQTT 发布
                 blob.arrayBuffer().then(buffer => {
                     const userId = userIdInput.value.trim();
                     const topic = `telefield/camera/image/${userId}`;
-                    
-                    mqttClient.publish(topic, new Uint8Array(buffer), { qos: 0 }, (err) => {
-                        if (!err) {
-                            status.textContent = `发送成功 (${Math.round(blob.size / 1024)} KB)`;
-                        } else {
-                            status.textContent = "发送失败: " + err.message;
-                        }
-                    });
+                    mqttClient.publish(topic, new Uint8Array(buffer), { qos: 0 });
                 });
             }, 'image/jpeg', 0.7);
+        }
+
+        // =================================================================
+        // 【新增】：HTML5 浏览器原生语音识别 (Web Speech API)
+        // =================================================================
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SpeechRecognition) {
+            const recognition = new SpeechRecognition();
+            recognition.continuous = false;   // 说话完毕后自动停止
+            recognition.interimResults = false; // 不输出临时中间结果
+            
+            // 语言设置：针对国外客户，可以设为 'en-US' (英文)；国内测试设为 'zh-CN' (中文)
+            recognition.lang = 'zh-CN'; 
+
+            recognition.onstart = () => {
+                voiceBtn.textContent = "正在聆听，请说话... (Listening)";
+                voiceBtn.style.backgroundColor = "#ffc107";
+                status.textContent = "请对准麦克风说话...";
+            };
+
+            recognition.onresult = (event) => {
+                const textResult = event.results[0][0].transcript;
+                status.textContent = `语音识别成功: "${textResult}"`;
+                
+                // 将翻译好的“文字”通过 MQTT 发送给 ESP32 (使用相同的主题前缀和 userId 关联)
+                const userId = userIdInput.value.trim();
+                const textTopic = `telefield/camera/text/${userId}`;
+                
+                if (mqttClient && mqttClient.connected) {
+                    mqttClient.publish(textTopic, textResult, { qos: 0 }, (err) => {
+                        if (!err) {
+                            status.textContent = `语音文字已发送："${textResult}"`;
+                        }
+                    });
+                }
+            };
+
+            recognition.onerror = (event) => {
+                status.textContent = "语音识别出错: " + event.error;
+                resetVoiceBtn();
+            };
+
+            recognition.onend = () => {
+                resetVoiceBtn();
+            };
+
+            voiceBtn.addEventListener('click', () => {
+                try {
+                    recognition.start();
+                } catch (e) {
+                    console.warn(e);
+                }
+            });
+        }
+
+        function resetVoiceBtn() {
+            voiceBtn.textContent = "点击说话并发送 (Speak)";
+            voiceBtn.style.backgroundColor = "#17a2b8";
         }
     </script>
 </body>
