@@ -9,7 +9,16 @@
     <style>
         body { font-family: -apple-system, sans-serif; text-align: center; margin: 20px; background-color: #f4f6f9; }
         .container { max-width: 400px; margin: auto; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
-        h2 { color: #333; margin-bottom: 20px; }
+        
+        /* Logo 图片样式 */
+        .logo-img { 
+            max-width: 150px; 
+            height: auto; 
+            display: inline-block; 
+            margin: 10px auto 15px auto; 
+        }
+
+        h2 { color: #333; margin-top: 5px; margin-bottom: 20px; font-size: 22px; }
         video { width: 100%; border-radius: 8px; margin-bottom: 12px; display: none; background: #000; }
         input, select, button { width: 100%; padding: 12px; margin: 10px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
         button { background-color: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; transition: background 0.2s; }
@@ -20,6 +29,9 @@
 </head>
 <body>
     <div class="container">
+        <!-- 【核心修改】：引入您上传的 Logo 图片，采用相对路径加载 -->
+        <img src="tf_logo.png" alt="Telefield Logo" class="logo-img">
+        
         <h2>云端图像传输客户端</h2>
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
@@ -30,7 +42,7 @@
             <option value="2000">2000毫秒</option>
             <option value="5000">5000毫秒</option>
         </select>
-        <button id="startBtn">连接中，请稍候...</button>
+        <button id="startBtn" disabled>连接中，请稍候...</button>
         <div id="status">正在建立与云端中转服务器的安全连接...</div>
     </div>
 
@@ -47,7 +59,7 @@
         let localStream = null;
         let mqttClient = null;
 
-        // 1. 初始化安全的 MQTT 连接 (通过 8084 端口的 WSS 协议，无跨域限制)
+        // 初始化安全的 MQTT 连接 (通过 8084 端口的 WSS 协议，无跨域限制)
         const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
         const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
         
@@ -126,7 +138,6 @@
                 // 将 Blob 转换为 ArrayBuffer (二进制数据)，直接通过 MQTT 发布
                 blob.arrayBuffer().then(buffer => {
                     const userId = userIdInput.value.trim();
-                    // 动态发布主题：将用户 ID 作为主题的一部分，如：telefield/camera/image/User_01
                     const topic = `telefield/camera/image/${userId}`;
                     
                     mqttClient.publish(topic, new Uint8Array(buffer), { qos: 0 }, (err) => {
