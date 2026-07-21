@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>云端图像传输客户端</title>
+    <!-- 引入公网标准的 MQTT 客户端库 -->
+    <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <style>
+        body { font-family: -apple-system, sans-serif; text-align: center; margin: 20px; background-color: #f4f6f9; }
+        .container { max-width: 400px; margin: auto; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
+        h2 { color: #333; margin-bottom: 20px; }
+        video { width: 100%; border-radius: 8px; margin-bottom: 12px; display: none; background: #000; }
+        input, select, button { width: 100%; padding: 12px; margin: 10px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
+        button { background-color: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; transition: background 0.2s; }
+        button:hover { background-color: #0056b3; }
+        #status { font-weight: bold; color: #666; margin-top: 15px; font-size: 14px; }
+        canvas { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>云端图像传输客户端</h2>
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas"></canvas>
+        <input type="text" id="userId" placeholder="输入用户ID" value="User_01">
+        <label style="display:block; text-align:left; font-size:14px; color:#555;">发送时间间隔:</label>
+        <select id="interval">
+            <option value="1000" selected>1000毫秒</option>
+            <option value="2000">2000毫秒</option>
+            <option value="5000">5000毫秒</option>
+        </select>
+        <button id="startBtn">连接中，请稍候...</button>
+        <div id="status">正在建立与云端中转服务器的安全连接...</div>
+    </div>
+
+    <script>
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const startBtn = document.getElementById('startBtn');
+        const status = document.getElementById('status');
+        const userIdInput = document.getElementById('userId');
+        const intervalSelect = document.getElementById('interval');
+        
+        let isStreaming = false;
+        let timer = null;
+        let localStream = null;
+        let mqttClient = null;
+
+        // 1. 初始化安全的 MQTT 连接 (通过 8084 端口的 WSS 协议，无跨域限制)
+        const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
+        const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
+        
+        mqttClient = mqtt.connect(brokerUrl, { clientId: clientId });
+
+        mqttClient.on('connect', () => {
+            status.textContent = "已连接至云中转服务器，可以开始传输！";
+            startBtn.textContent = "启动安全传输";
+            startBtn.disabled = false;
+        });
+
+        mqttClient.on('error', (err) => {
+            status.textContent = "连接中转服务器失败: " + err.message;
+        });
+
+        startBtn.addEventListener('click', async () => {
+            if (isStreaming) {
+                stopStreaming();
+            } else {
+                await startStreaming();
+            }
+        });
+
+        async function startStreaming() {
+            const userId = userIdInput.value.trim();
+            if (!userId) {
+                alert("请输入用户ID！");
+                return;
+            }
+
+            try {
+                // 原生调用摄像头 (由于部署在 HTTPS 公网，任何手机都会秒弹授权)
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+                video.srcObject = stream;
+                video.style.display = "block";
+                localStream = stream;
+                isStreaming = true;
+                
+                startBtn.textContent = "停止发送";
+                startBtn.style.backgroundColor = "#dc3545";
+                status.textContent = "正在向云端高速发送图片...";
+
+                canvas.width = 320;
+                canvas.height = 240;
+
+                const interval = parseInt(intervalSelect.value);
+                timer = setInterval(captureAndUpload, interval);
+            } catch (err) {
+                status.textContent = "无法获取摄像头: " + err.message;
+            }
+        }
+
+        function stopStreaming() {
+            isStreaming = false;
+            startBtn.textContent = "启动安全传输";
+            startBtn.style.backgroundColor = "#007bff";
+            status.textContent = "发送已停止";
+            video.style.display = "none";
+
+            if (timer) clearInterval(timer);
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+            }
+            video.srcObject = null;
+        }
+
+        function captureAndUpload() {
+            if (!isStreaming || !mqttClient.connected) return;
+            
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, 320, 240);
+            
+            canvas.toBlob((blob) => {
+                if (!blob) return;
+
+                // 将 Blob 转换为 ArrayBuffer (二进制数据)，直接通过 MQTT 发布
+                blob.arrayBuffer().then(buffer => {
+                    const userId = userIdInput.value.trim();
+                    // 动态发布主题：将用户 ID 作为主题的一部分，如：telefield/camera/image/User_01
+                    const topic = `telefield/camera/image/${userId}`;
+                    
+                    mqttClient.publish(topic, new Uint8Array(buffer), { qos: 0 }, (err) => {
+                        if (!err) {
+                            status.textContent = `发送成功 (${Math.round(blob.size / 1024)} KB)`;
+                        } else {
+                            status.textContent = "发送失败: " + err.message;
+                        }
+                    });
+                });
+            }, 'image/jpeg', 0.7);
+        }
+    </script>
+</body>
+</html>
