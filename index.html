@@ -58,7 +58,7 @@
     </div>
 
     <script>
-        const video = document.getElementById('video');
+       const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
         const voiceBtn = document.getElementById('voiceBtn');
@@ -72,7 +72,7 @@
         let localStream = null;
         let mqttClient = null;
 
-        // 【新增 1】：用于在录音期间临时暂停图片流传输的全局标志位
+        // 用于在录音期间临时暂停图片流传输的全局标志位
         let isVoiceActive = false; 
 
         // 初始化安全的 MQTT 连接 (EMQX WSS 端口 8084)
@@ -158,8 +158,7 @@
         function captureAndUpload() {
             if (!isStreaming || !mqttClient.connected) return;
 
-            // 【核心修改 2】：如果用户正在进行语音录音，则完全跳过这一帧图片的捕获和网络上传
-            // 这能彻底清空网络传输通道，保证接下来生成的语音文字能够毫无阻碍、极其顺畅地秒达 ESP32
+            // 如果用户正在进行语音录音，则完全跳过这一帧图片的捕获和网络上传
             if (isVoiceActive) {
                 return; 
             }
@@ -178,24 +177,49 @@
         }
 
         // =================================================================
-        // 【核心修改 3】：HTML5 浏览器原生语音识别（开关式点按 + 互斥图片发送）
+        // 【防卡死安全升级】：HTML5 浏览器原生语音识别（双重保险防御）
         // =================================================================
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
             recognition.continuous = false;   
             recognition.interimResults = false; 
-            
-            // 国外客户可设为 'en-US' (英文)；国内测试设为 'zh-CN' (中文)
             recognition.lang = 'zh-CN'; 
 
-            let isRecording = false; // 用于维护“点一下开始，再点一下停止并发送”的开关状态
+            let isRecording = false; // 开关状态
+            let voiceTimeout = null; // 超时守护定时器
+
+            // 【核心防御函数】：强制重置所有状态，确保 100% 能够恢复摄像头
+            function forceResetVoice() {
+                if (voiceTimeout) {
+                    clearTimeout(voiceTimeout);
+                    voiceTimeout = null;
+                }
+                try {
+                    recognition.stop(); // 强行尝试关闭麦克风
+                } catch (e) {
+                    // 忽略已经关闭的报错
+                }
+                isRecording = false;
+                isVoiceActive = false; // 强行解除图片屏蔽，立刻恢复画面传输！
+                resetVoiceBtn();
+            }
 
             recognition.onstart = () => {
-                isVoiceActive = true; // 开启录音：立即暂停图片流发送，腾出网络通道
+                isVoiceActive = true; // 开启录音：立即暂停图片流发送
                 voiceBtn.textContent = "说完了，点击发送 (Stop & Send)";
                 voiceBtn.style.backgroundColor = "#ffc107";
-                status.textContent = "正在录音（图片传输已暂停），说完了请再次点击按钮发送...";
+                status.textContent = "正在录音（图片已暂停），说完了请再次点击按钮发送...";
+
+                // 【保险一】：启动 10 秒超时自动恢复守护器。
+                // 如果国内安卓/华为由于缺少谷歌服务导致引擎无限期挂起卡死，10秒后自动强行复位，绝不影响画面传输！
+                if (voiceTimeout) clearTimeout(voiceTimeout);
+                voiceTimeout = setTimeout(() => {
+                    if (isVoiceActive) {
+                        status.textContent = "语音引擎未响应（国内安卓手机可能缺少谷歌服务），已自动恢复图片传输。";
+                        forceResetVoice();
+                    }
+                }, 10000); // 10秒超时
             };
 
             recognition.onresult = (event) => {
@@ -212,20 +236,24 @@
                         }
                     });
                 }
+                // 成功获取到结果后，立即主动执行强制复位
+                forceResetVoice();
             };
 
             recognition.onerror = (event) => {
-                status.textContent = "语音识别出错: " + event.error;
+                status.textContent = "语音识别出错 (国内安卓可能不支持此功能): " + event.error;
+                // 【保险二】：一旦出错（如网络超时、无谷歌框架等错误），立刻复位，绝不卡死
+                forceResetVoice(); 
             };
 
-            // 无论录音是正常结束、报错结束还是由于超时自动结束，都会触发此回调
             recognition.onend = () => {
-                isRecording = false;
-                isVoiceActive = false; // 录音彻底结束：立刻恢复网页端图片流的自动循环发送
-                resetVoiceBtn();
+                // 如果由于其他未知原因（如系统自动切断）结束，只要标志位还处于锁定状态，则强行复位
+                if (isVoiceActive || isRecording) {
+                    forceResetVoice();
+                }
             };
 
-            // 实现“点按开关式（Toggle）”交互逻辑
+            // 开关式点击事件
             voiceBtn.addEventListener('click', () => {
                 if (!isRecording) {
                     try {
@@ -233,16 +261,13 @@
                         isRecording = true;
                     } catch (e) {
                         console.warn(e);
+                        status.textContent = "启动语音服务失败，已自动恢复图片传输。";
+                        forceResetVoice();
                     }
                 } else {
-                    try {
-                        // 强制停止监听：这会立刻命令浏览器停止麦克风采集，
-                        // 并立刻将截至目前的录音进行翻译，从而秒发出去
-                        recognition.stop(); 
-                        isRecording = false;
-                    } catch (e) {
-                        console.warn(e);
-                    }
+                    // 【保险三】：第二次点击时，无论是正常结束还是卡死状态下，
+                    // 都直接执行强制重置，确保用户可以通过“再点一次” 100% 抢救并恢复摄像头画面！
+                    forceResetVoice();
                 }
             });
         }
@@ -251,7 +276,8 @@
             voiceBtn.textContent = "点击说话并发送 (Speak)";
             voiceBtn.style.backgroundColor = "#17a2b8";
         }
+
     </script>
-    </script>
+    
 </body>
 </html>
