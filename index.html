@@ -3,9 +3,10 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>多模态云端传输客户端</title>
-    <!-- 引入公网标准的 MQTT 客户端库 -->
+    <title>Telefield 智能会议传输终端</title>
+    <!-- 1. 引入标准 MQTT.js 和科大讯飞必须的 CryptoJS 鉴权库 -->
     <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
     <style>
         body { font-family: -apple-system, sans-serif; text-align: center; margin: 20px; background-color: #f4f6f9; }
         .container { max-width: 400px; margin: auto; padding: 20px; background: white; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }
@@ -15,27 +16,20 @@
         input, select, button { width: 100%; padding: 12px; margin: 8px 0; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 16px; }
         button { background-color: #007bff; color: white; border: none; cursor: pointer; font-weight: bold; transition: background 0.2s; }
         button:hover { background-color: #0056b3; }
-        
-        /* 语音输入按钮样式 */
         .voice-btn { background-color: #17a2b8; margin-top: 15px; }
         .voice-btn:hover { background-color: #138496; }
-        .voice-btn:active { background-color: #117a8b; }
-        
         #status { font-weight: bold; color: #666; margin-top: 15px; font-size: 14px; }
         canvas { display: none; }
     </style>
 </head>
 <body>
     <div class="container">
-        <!-- 1. 您的企业 Logo -->
         <img src="tf_logo.png" alt="Telefield Logo" class="logo-img">
-        
         <h2>多模态云端传输客户端</h2>
         <video id="video" autoplay playsinline muted></video>
         <canvas id="canvas"></canvas>
         <input type="text" id="userId" placeholder="输入用户ID" value="User_01">
         
-        <!-- 2. 新增：摄像头方向选择 -->
         <label style="display:block; text-align:left; font-size:14px; color:#555;">选择摄像头:</label>
         <select id="cameraFacing">
             <option value="environment" selected>后置摄像头 (Rear)</option>
@@ -50,14 +44,20 @@
         </select>
         
         <button id="startBtn" disabled>连接中，请稍候...</button>
-        
-        <!-- 3. 新增：语音识别发送按钮 -->
         <button id="voiceBtn" class="voice-btn" style="display: none;">点击说话并发送 (Speak)</button>
         
         <div id="status">正在建立与云端中转服务器的安全连接...</div>
     </div>
 
     <script>
+        // =================================================================
+        // 【核心修改】：请在下方填入您从科大讯飞控制台获取的 3 个服务凭证！
+        // =================================================================
+        const XFYUN_APPID     = "5c762576";
+        const XFYUN_API_KEY   = "bd9eecd4d2b7493692861e33c41fc3ff";
+        const XFYUN_API_SECRET = "d5b20f62ed7fd38c2e636a73b05de21d";
+        // =================================================================
+
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
@@ -71,44 +71,24 @@
         let timer = null;
         let localStream = null;
         let mqttClient = null;
-
-        // 用于在录音期间临时暂停图片流传输的全局标志位
         let isVoiceActive = false; 
 
-        // 【新增 1】：检测手机操作系统类型
-        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
-        const isAndroid = /Android/i.test(navigator.userAgent);
-
-        // 初始化安全的 MQTT 连接 (EMQX WSS 端口 8084)
+        // 初始化 MQTT 
         const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
         const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
-        
         mqttClient = mqtt.connect(brokerUrl, { clientId: clientId });
 
         mqttClient.on('connect', () => {
-            status.textContent = "已连接至云中转服务器，可以开始传输！";
+            status.textContent = "已连接至云中转，可以开始传输！";
             startBtn.textContent = "启动安全传输";
             startBtn.disabled = false;
             
-            // 如果浏览器支持 Web Speech API，则显示语音按钮
-            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-                voiceBtn.style.display = "block";
-                
-                // 【核心修改 2】：根据手机类型，向用户展示定制化的状态提示
-                if (isIOS) {
-                    status.textContent = "连接成功！已为您启用 iPhone (苹果 Siri 原生引擎) 语音服务。";
-                } else if (isAndroid) {
-                    status.textContent = "连接成功！已为您启用 Android 语音服务（国内机型由于缺少谷歌服务可能报错）。";
-                } else {
-                    status.textContent = "连接成功！已为您启用标准网页语音服务。";
-                }
-            } else {
-                console.warn("当前浏览器不支持 Web Speech API");
-            }
+            // 只要开启了网页，就直接显示语音发送按钮
+            voiceBtn.style.display = "block";
         });
 
         mqttClient.on('error', (err) => {
-            status.textContent = "连接中转服务器失败: " + err.message;
+            status.textContent = "网络连接失败: " + err.message;
         });
 
         cameraFacingSelect.addEventListener('change', async () => {
@@ -171,11 +151,7 @@
 
         function captureAndUpload() {
             if (!isStreaming || !mqttClient.connected) return;
-
-            // 如果用户正在进行语音录音，则完全跳过这一帧图片的捕获和网络上传
-            if (isVoiceActive) {
-                return; 
-            }
+            if (isVoiceActive) return; // 录音期间拦截图片
             
             const ctx = canvas.getContext('2d');
             ctx.drawImage(video, 0, 0, 320, 240);
@@ -191,108 +167,206 @@
         }
 
         // =================================================================
-        // 【核心修改 3】：HTML5 浏览器原生语音识别（iOS / Android 双流分发）
+        // 【核心修改】：科大讯飞流式语音识别（免 APP 安装，全机型适配）
         // =================================================================
-        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (SpeechRecognition) {
-            const recognition = new SpeechRecognition();
-            recognition.continuous = false;   
-            recognition.interimResults = false; 
-            
-            // 默认语言设置为中文 (国外客户演示时可修改为 'en-US')
-            recognition.lang = 'zh-CN'; 
+        let isRecording = false;
+        let audioContext = null;
+        let scriptProcessor = null;
+        let mediaStream = null;
+        let xfSocket = null;
+        let voiceTimeout = null;
+        let accumulatedText = ""; // 累积翻译结果
 
-            let isRecording = false; // 开关状态
-            let voiceTimeout = null; // 超时守护定时器
-
-            // 强制重置所有状态，确保 100% 能够恢复摄像头
-            function forceResetVoice() {
-                if (voiceTimeout) {
-                    clearTimeout(voiceTimeout);
-                    voiceTimeout = null;
-                }
-                try {
-                    recognition.stop(); 
-                } catch (e) {}
-                isRecording = false;
-                isVoiceActive = false; // 解除图片屏蔽，恢复画面
-                resetVoiceBtn();
-            }
-
-            recognition.onstart = () => {
-                isVoiceActive = true; // 开启录音：立即暂停图片流发送
-                voiceBtn.textContent = "说完了，点击发送 (Stop & Send)";
-                voiceBtn.style.backgroundColor = "#ffc107";
-                status.textContent = "正在录音（图片已暂停），说完了请再次点击按钮发送...";
-
-                // 启动 10 秒超时自动恢复守护器。
-                // 仅对非 iOS 设备（如安卓）启用该超时限制，防止卡死
-                if (!isIOS) {
-                    if (voiceTimeout) clearTimeout(voiceTimeout);
-                    voiceTimeout = setTimeout(() => {
-                        if (isVoiceActive) {
-                            status.textContent = "语音服务未响应（国内安卓手机可能缺少谷歌服务），已自动恢复图片传输。";
-                            forceResetVoice();
-                        }
-                    }, 10000); 
-                }
-            };
-
-            recognition.onresult = (event) => {
-                const textResult = event.results[0][0].transcript;
-                status.textContent = `语音识别成功: "${textResult}"`;
-                
-                const userId = userIdInput.value.trim();
-                const textTopic = `telefield/camera/text/${userId}`;
-                
-                if (mqttClient && mqttClient.connected) {
-                    mqttClient.publish(textTopic, textResult, { qos: 0 }, (err) => {
-                        if (!err) {
-                            status.textContent = `发送成功："${textResult}"`;
-                        }
-                    });
-                }
-                forceResetVoice();
-            };
-
-            recognition.onerror = (event) => {
-                if (isIOS) {
-                    // 如果是 iPhone 报错，极大概率是麦克风权限在 Safari 中被禁用了
-                    status.textContent = "iPhone 语音获取失败: " + event.error + " (请检查 Safari 的麦克风权限是否开启)";
-                } else {
-                    status.textContent = "语音识别出错 (国内安卓可能不支持此功能): " + event.error;
-                }
-                forceResetVoice(); 
-            };
-
-            recognition.onend = () => {
-                if (isVoiceActive || isRecording) {
-                    forceResetVoice();
-                }
-            };
-
-            // 开关式点击事件
-            voiceBtn.addEventListener('click', () => {
-                if (!isRecording) {
-                    try {
-                        recognition.start();
-                        isRecording = true;
-                    } catch (e) {
-                        console.warn(e);
-                        status.textContent = "启动语音服务失败，已自动恢复图片传输。";
-                        forceResetVoice();
-                    }
-                } else {
-                    forceResetVoice();
-                }
-            });
+        // A. 讯飞签名计算算法 (HMAC-SHA256 Web 鉴权)
+        function getXfUrl() {
+            const host = "iat-api.xfyun.cn";
+            const date = new Date().toGMTString();
+            const signatureOrigin = `host: ${host}\ndate: ${date}\nGET /v2/iat HTTP/1.1`;
+            const hash = CryptoJS.HmacSHA256(signatureOrigin, XFYUN_API_SECRET);
+            const signature = CryptoJS.enc.Base64.stringify(hash);
+            const authorizationOrigin = `api_key="${XFYUN_API_KEY}", algorithm="hmac-sha256", headers="host date request-line", signature="${signature}"`;
+            const authorization = btoa(authorizationOrigin);
+            return `wss://${host}/v2/iat?authorization=${authorization}&date=${encodeURIComponent(date)}&host=${host}`;
         }
 
-        function resetVoiceBtn() {
+        // B. 强制复位
+        function forceResetVoice() {
+            if (voiceTimeout) { clearTimeout(voiceTimeout); voiceTimeout = null; }
+            isRecording = false;
+            isVoiceActive = false; // 解除图片拦截
             voiceBtn.textContent = "点击说话并发送 (Speak)";
             voiceBtn.style.backgroundColor = "#17a2b8";
+            
+            // 释放麦克风和音频上下文，保护资源
+            if (scriptProcessor) { scriptProcessor.disconnect(); scriptProcessor = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            if (xfSocket) { xfSocket.close(); xfSocket = null; }
+        }
+
+        // C. 开始向讯飞服务器流式采集并发送 PCM 音频
+        async function startXfRecord() {
+            accumulatedText = "";
+            isVoiceActive = true; // 拦截图片
+            status.textContent = "正在连接科大讯飞服务器...";
+
+            try {
+                // 1. 获取麦克风权限
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+                
+                // 2. 建立加密 WebSocket 连接到科大讯飞
+                xfSocket = new WebSocket(getXfUrl());
+                
+                xfSocket.onopen = () => {
+                    status.textContent = "科大讯飞已准备好，请说话...";
+                    voiceBtn.textContent = "说完了，点击发送 (Stop & Send)";
+                    voiceBtn.style.backgroundColor = "#ffc107";
+                    
+                    // 发送第一帧配置数据
+                    const firstFrame = {
+                        common: { app_id: XFYUN_APPID },
+                        business: { language: "zh_cn", domain: "iat", accent: "mandarin", vad_eos: 3000 },
+                        data: { status: 0, format: "audio/L16;rate=16000", encoding: "raw", audio: "" }
+                    };
+                    xfSocket.send(JSON.stringify(firstFrame));
+                    
+                    // 启动采集并重采样音频到 16000Hz (科大讯飞强制标准)
+                    startAudioProcessing();
+                };
+
+                xfSocket.onmessage = (event) => {
+                    const res = JSON.parse(event.data);
+                    if (res.code !== 0) {
+                        status.textContent = "科大讯飞识别报错: " + res.message;
+                        forceResetVoice();
+                        return;
+                    }
+                    
+                    // 解析词并拼装文字
+                    if (res.data && res.data.result) {
+                        let text = "";
+                        const ws = res.data.result.ws;
+                        for (let i = 0; i < ws.length; i++) {
+                            text += ws[i].cw[0].w;
+                        }
+                        accumulatedText += text;
+                        status.textContent = `聆听中: "${accumulatedText}"`;
+                    }
+                };
+
+                xfSocket.onerror = (err) => {
+                    status.textContent = "科大讯飞连接出错。";
+                    forceResetVoice();
+                };
+
+                // 启动 10 秒超时强制恢复，防止由于网速原因挂起
+                voiceTimeout = setTimeout(() => {
+                    status.textContent = "传输超时，已自动恢复图片流。";
+                    forceResetVoice();
+                }, 12000);
+
+            } catch (err) {
+                status.textContent = "无法调用麦克风: " + err.message;
+                forceResetVoice();
+            }
+        }
+
+        // D. 浏览器重采样与 PCM 拼装器
+        function startAudioProcessing() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            const source = audioContext.createMediaStreamSource(mediaStream);
+            scriptProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+            
+            source.connect(scriptProcessor);
+            scriptProcessor.connect(audioContext.destination);
+            
+            scriptProcessor.onaudioprocess = (event) => {
+                if (!isRecording || !xfSocket || xfSocket.readyState !== WebSocket.OPEN) return;
+                
+                const inputData = event.inputBuffer.getChannelData(0);
+                // 1. 重采样音频至 16000Hz (线性插值算法)
+                const resampledData = downsampleBuffer(inputData, audioContext.sampleRate, 16000);
+                
+                // 2. 转换为 16位有符号 PCM 二进制
+                const pcmBuffer = new ArrayBuffer(resampledData.length * 2);
+                const view = new DataView(pcmBuffer);
+                floatTo16BitPCM(view, 0, resampledData);
+                
+                // 3. 转为 Base64 格式发送
+                const base64Audio = arrayBufferToBase64(pcmBuffer);
+                const frame = {
+                    data: { status: 1, format: "audio/L16;rate=16000", encoding: "raw", audio: base64Audio }
+                };
+                xfSocket.send(JSON.stringify(frame));
+            };
+        }
+
+        // E. 停止并发送结果到 MQTT
+        function stopXfAndSend() {
+            if (xfSocket && xfSocket.readyState === WebSocket.OPEN) {
+                // 发送最后一帧
+                const lastFrame = {
+                    data: { status: 2, format: "audio/L16;rate=16000", encoding: "raw", audio: "" }
+                };
+                xfSocket.send(JSON.stringify(lastFrame));
+            }
+
+            // 发送文字结果至 MQTT 中转站
+            const finalText = accumulatedText.trim();
+            if (finalText) {
+                const userId = userIdInput.value.trim();
+                const textTopic = `telefield/camera/text/${userId}`;
+                mqttClient.publish(textTopic, finalText, { qos: 0 });
+            }
+
+            forceResetVoice();
+        }
+
+        // 按钮开关控制
+        voiceBtn.addEventListener('click', () => {
+            if (!isRecording) {
+                isRecording = true;
+                startXfRecord();
+            } else {
+                stopXfAndSend();
+            }
+        });
+
+        // ==================== 音频重采样及格式底层转换辅助函数 ====================
+        function downsampleBuffer(buffer, inputSampleRate, outputSampleRate) {
+            if (inputSampleRate === outputSampleRate) return buffer;
+            const sampleRateRatio = inputSampleRate / outputSampleRate;
+            const newLength = Math.round(buffer.length / sampleRateRatio);
+            const result = new Float32Array(newLength);
+            let offsetResult = 0; let offsetBuffer = 0;
+            while (offsetResult < result.length) {
+                const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+                let accum = 0; let count = 0;
+                for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+                    accum += buffer[i]; count++;
+                }
+                result[offsetResult] = accum / count;
+                offsetResult++; offsetBuffer = nextOffsetBuffer;
+            }
+            return result;
+        }
+
+        function floatTo16BitPCM(output, offset, input) {
+            for (let i = 0; i < input.length; i++, offset += 2) {
+                let s = Math.max(-1, Math.min(1, input[i]));
+                output.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = '';
+            const bytes = new Uint8Array(buffer);
+            const len = bytes.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return window.btoa(binary);
         }
     </script>
-    
 </body>
 </html>
