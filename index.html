@@ -58,7 +58,7 @@
     </div>
 
     <script>
-       const video = document.getElementById('video');
+        const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const startBtn = document.getElementById('startBtn');
         const voiceBtn = document.getElementById('voiceBtn');
@@ -75,6 +75,10 @@
         // 用于在录音期间临时暂停图片流传输的全局标志位
         let isVoiceActive = false; 
 
+        // 【新增 1】：检测手机操作系统类型
+        const isIOS = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+        const isAndroid = /Android/i.test(navigator.userAgent);
+
         // 初始化安全的 MQTT 连接 (EMQX WSS 端口 8084)
         const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
         const clientId = 'web_client_' + Math.random().toString(16).substr(2, 8);
@@ -86,8 +90,18 @@
             startBtn.textContent = "启动安全传输";
             startBtn.disabled = false;
             
+            // 如果浏览器支持 Web Speech API，则显示语音按钮
             if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                 voiceBtn.style.display = "block";
+                
+                // 【核心修改 2】：根据手机类型，向用户展示定制化的状态提示
+                if (isIOS) {
+                    status.textContent = "连接成功！已为您启用 iPhone (苹果 Siri 原生引擎) 语音服务。";
+                } else if (isAndroid) {
+                    status.textContent = "连接成功！已为您启用 Android 语音服务（国内机型由于缺少谷歌服务可能报错）。";
+                } else {
+                    status.textContent = "连接成功！已为您启用标准网页语音服务。";
+                }
             } else {
                 console.warn("当前浏览器不支持 Web Speech API");
             }
@@ -177,31 +191,31 @@
         }
 
         // =================================================================
-        // 【防卡死安全升级】：HTML5 浏览器原生语音识别（双重保险防御）
+        // 【核心修改 3】：HTML5 浏览器原生语音识别（iOS / Android 双流分发）
         // =================================================================
         const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
         if (SpeechRecognition) {
             const recognition = new SpeechRecognition();
             recognition.continuous = false;   
             recognition.interimResults = false; 
+            
+            // 默认语言设置为中文 (国外客户演示时可修改为 'en-US')
             recognition.lang = 'zh-CN'; 
 
             let isRecording = false; // 开关状态
             let voiceTimeout = null; // 超时守护定时器
 
-            // 【核心防御函数】：强制重置所有状态，确保 100% 能够恢复摄像头
+            // 强制重置所有状态，确保 100% 能够恢复摄像头
             function forceResetVoice() {
                 if (voiceTimeout) {
                     clearTimeout(voiceTimeout);
                     voiceTimeout = null;
                 }
                 try {
-                    recognition.stop(); // 强行尝试关闭麦克风
-                } catch (e) {
-                    // 忽略已经关闭的报错
-                }
+                    recognition.stop(); 
+                } catch (e) {}
                 isRecording = false;
-                isVoiceActive = false; // 强行解除图片屏蔽，立刻恢复画面传输！
+                isVoiceActive = false; // 解除图片屏蔽，恢复画面
                 resetVoiceBtn();
             }
 
@@ -211,15 +225,17 @@
                 voiceBtn.style.backgroundColor = "#ffc107";
                 status.textContent = "正在录音（图片已暂停），说完了请再次点击按钮发送...";
 
-                // 【保险一】：启动 10 秒超时自动恢复守护器。
-                // 如果国内安卓/华为由于缺少谷歌服务导致引擎无限期挂起卡死，10秒后自动强行复位，绝不影响画面传输！
-                if (voiceTimeout) clearTimeout(voiceTimeout);
-                voiceTimeout = setTimeout(() => {
-                    if (isVoiceActive) {
-                        status.textContent = "语音引擎未响应（国内安卓手机可能缺少谷歌服务），已自动恢复图片传输。";
-                        forceResetVoice();
-                    }
-                }, 10000); // 10秒超时
+                // 启动 10 秒超时自动恢复守护器。
+                // 仅对非 iOS 设备（如安卓）启用该超时限制，防止卡死
+                if (!isIOS) {
+                    if (voiceTimeout) clearTimeout(voiceTimeout);
+                    voiceTimeout = setTimeout(() => {
+                        if (isVoiceActive) {
+                            status.textContent = "语音服务未响应（国内安卓手机可能缺少谷歌服务），已自动恢复图片传输。";
+                            forceResetVoice();
+                        }
+                    }, 10000); 
+                }
             };
 
             recognition.onresult = (event) => {
@@ -236,18 +252,20 @@
                         }
                     });
                 }
-                // 成功获取到结果后，立即主动执行强制复位
                 forceResetVoice();
             };
 
             recognition.onerror = (event) => {
-                status.textContent = "语音识别出错 (国内安卓可能不支持此功能): " + event.error;
-                // 【保险二】：一旦出错（如网络超时、无谷歌框架等错误），立刻复位，绝不卡死
+                if (isIOS) {
+                    // 如果是 iPhone 报错，极大概率是麦克风权限在 Safari 中被禁用了
+                    status.textContent = "iPhone 语音获取失败: " + event.error + " (请检查 Safari 的麦克风权限是否开启)";
+                } else {
+                    status.textContent = "语音识别出错 (国内安卓可能不支持此功能): " + event.error;
+                }
                 forceResetVoice(); 
             };
 
             recognition.onend = () => {
-                // 如果由于其他未知原因（如系统自动切断）结束，只要标志位还处于锁定状态，则强行复位
                 if (isVoiceActive || isRecording) {
                     forceResetVoice();
                 }
@@ -265,8 +283,6 @@
                         forceResetVoice();
                     }
                 } else {
-                    // 【保险三】：第二次点击时，无论是正常结束还是卡死状态下，
-                    // 都直接执行强制重置，确保用户可以通过“再点一次” 100% 抢救并恢复摄像头画面！
                     forceResetVoice();
                 }
             });
@@ -276,7 +292,6 @@
             voiceBtn.textContent = "点击说话并发送 (Speak)";
             voiceBtn.style.backgroundColor = "#17a2b8";
         }
-
     </script>
     
 </body>
