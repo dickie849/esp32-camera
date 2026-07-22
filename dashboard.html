@@ -1,0 +1,442 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Telefield 智能会议控制大屏 (心跳同步版)</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/mqtt/4.1.0/mqtt.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0f172a;
+            --card-bg: #1e293b;
+            --text-main: #f8fafc;
+            --text-sub: #94a3b8;
+            --border-color: #334155;
+            --accent-color: #6366f1;
+            --accent-hover: #4f46e5;
+            --success-color: #10b981;
+        }
+
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            margin: 0; 
+            padding: 0; 
+            background-color: var(--bg-color); 
+            color: var(--text-main);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            background-color: var(--card-bg);
+            border-bottom: 1px solid var(--border-color);
+            padding: 10px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            height: 60px;
+            box-sizing: border-box;
+        }
+
+        .header-left { display: flex; align-items: center; gap: 15px; }
+        .logo-img { max-height: 40px; width: auto; }
+        .header-title { font-size: 20px; font-weight: bold; letter-spacing: 1px; margin: 0; }
+        
+        .controls { display: flex; align-items: center; gap: 15px; }
+        .status-badge { padding: 6px 12px; border-radius: 20px; font-size: 13px; font-weight: bold; background: #ef4444; color: white; }
+        .status-badge.connected { background: var(--success-color); }
+        select, input {
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 14px;
+            outline: none;
+        }
+        input { width: 180px; }
+
+        main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            padding: 15px;
+            gap: 15px;
+            box-sizing: border-box;
+        }
+
+        .video-column {
+            flex: 3;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        .column-title { font-size: 16px; font-weight: bold; color: var(--text-sub); margin-top: 0; margin-bottom: 15px; display: flex; justify-content: space-between; }
+        .grid-container {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+            gap: 15px;
+            overflow-y: auto;
+            align-content: start;
+        }
+
+        .user-card {
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            position: relative;
+            aspect-ratio: 4/3;
+        }
+        .user-card .user-header {
+            background: rgba(30, 41, 59, 0.85);
+            padding: 8px 12px;
+            font-size: 14px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid var(--border-color);
+        }
+        .user-card img {
+            width: 100%;
+            height: calc(100% - 35px);
+            object-fit: cover;
+            background: #000;
+        }
+        .user-time { font-size: 11px; color: var(--text-sub); font-weight: normal; }
+
+        .transcript-column {
+            flex: 1.5;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        .transcript-list {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            padding-right: 5px;
+        }
+        .transcript-item {
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.5;
+        }
+        .item-meta { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-sub); margin-bottom: 4px; }
+        .item-user { font-weight: bold; color: var(--accent-color); }
+
+        .summary-column {
+            flex: 1.5;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            display: flex;
+            flex-direction: column;
+            padding: 15px;
+            box-sizing: border-box;
+        }
+        .summary-btn {
+            background-color: var(--accent-color);
+            color: white;
+            border: none;
+            padding: 10px;
+            border-radius: 6px;
+            font-size: 15px;
+            font-weight: bold;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-bottom: 15px;
+        }
+        .summary-btn:hover { background-color: var(--accent-hover); }
+        .summary-btn:disabled { background-color: var(--border-color); cursor: not-allowed; }
+        .summary-content {
+            flex: 1;
+            background: #0f172a;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            overflow-y: auto;
+            font-size: 14px;
+            line-height: 1.6;
+            white-space: pre-wrap; 
+            color: #e2e8f0;
+        }
+
+        ::-webkit-scrollbar { width: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 10px; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-left">
+            <img src="tf_logo.png" alt="Logo" class="logo-img" onerror="this.style.display='none'">
+            <h1 class="header-title">智能会议协同大屏</h1>
+        </div>
+        <div class="controls">
+            <div id="mqtt-status" class="status-badge">MQTT: 离线</div>
+            
+            <select id="ai-provider">
+                <option value="deepseek" selected>DeepSeek (推荐)</option>
+                <option value="openai">OpenAI</option>
+            </select>
+            
+            <input type="password" id="api-key" placeholder="输入对应 API Key 进行总结">
+        </div>
+    </header>
+
+    <main>
+        <section class="video-column">
+            <div class="column-title">
+                <span>参会人实时画面 (Camera Stream)</span>
+                <span id="user-count" style="font-size:14px; font-weight:normal;">在线人数: 0</span>
+            </div>
+            <div id="grid-container" class="grid-container"></div>
+        </section>
+
+        <section class="transcript-column">
+            <div class="column-title">实时速记 (Live Transcript)</div>
+            <div id="transcript-list" class="transcript-list"></div>
+        </section>
+
+        <section class="summary-column">
+            <button id="summary-btn" class="summary-btn">一键生成 AI 会议摘要</button>
+            <div id="summary-content" class="summary-content">等待会议发言后点击生成摘要...</div>
+        </section>
+    </main>
+
+    <script>
+        const gridContainer = document.getElementById('grid-container');
+        const transcriptList = document.getElementById('transcript-list');
+        const summaryContent = document.getElementById('summary-content');
+        const summaryBtn = document.getElementById('summary-btn');
+        const mqttStatus = document.getElementById('mqtt-status');
+        const userCountSpan = document.getElementById('user-count');
+        const aiProviderSelect = document.getElementById('ai-provider');
+        const apiKeyInput = document.getElementById('api-key');
+
+        let activeUsers = new Set();
+        let meetingTranscripts = []; 
+        let userUrls = {}; 
+
+        // 【新增 1】：心跳同步字典，用于记录每个用户的最后更新时间戳
+        let lastUpdateTime = {}; 
+
+      //  const brokerUrl = 'ws://broker.emqx.io:8083/mqtt';
+        const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';			// 加密连接
+        const clientId = 'dashboard_client_' + Math.random().toString(16).substr(2, 8);
+        const mqttClient = mqtt.connect(brokerUrl, { clientId: clientId });
+
+        mqttClient.on('connect', () => {
+            mqttStatus.textContent = "MQTT: 已连接";
+            mqttStatus.className = "status-badge connected";
+            mqttClient.subscribe('telefield/camera/#');
+            console.log("Subscribed successfully!");
+        });
+
+        mqttClient.on('close', () => {
+            mqttStatus.textContent = "MQTT: 离线";
+            mqttStatus.className = "status-badge";
+        });
+
+        mqttClient.on('message', (topic, payload) => {
+            const topicStr = String(topic);
+
+            if (topicStr.startsWith('telefield/camera/image/')) {
+                const userId = topicStr.substring(23);
+                activeUsers.add(userId);
+                lastUpdateTime[userId] = Date.now(); // 更新心跳时间戳
+                updateUserCount();
+
+                const blob = new Blob([payload], { type: 'image/jpeg' });
+                const newUrl = URL.createObjectURL(blob);
+                if (userUrls[userId]) {
+                    URL.revokeObjectURL(userUrls[userId]); 
+                }
+                userUrls[userId] = newUrl;
+
+                updateUserCard(userId, newUrl);
+            }
+            else if (topicStr.startsWith('telefield/camera/text/')) {
+                const userId = topicStr.substring(22);
+                const text = new TextDecoder("utf-8").decode(payload);
+                const timeStr = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+                activeUsers.add(userId);
+                lastUpdateTime[userId] = Date.now(); // 更新心跳时间戳
+                updateUserCount();
+
+                meetingTranscripts.push({ time: timeStr, user: userId, text: text });
+                appendTranscript(userId, timeStr, text);
+            }
+        });
+
+        // 【新增 2】：启动心跳定时器。每 3 秒检测一次，10 秒无数据则判定离线并移除卡片
+        setInterval(() => {
+            const now = Date.now();
+            const timeoutLimit = 7000; // 7 秒超时限制
+
+            for (let userId in lastUpdateTime) {
+                if (now - lastUpdateTime[userId] > timeoutLimit) {
+                    // 1. 强行在 DOM 中删除对应的手机画面卡片
+                    const card = document.getElementById(`user-card-${userId}`);
+                    if (card) card.remove();
+
+                    // 2. 强行销毁该用户图片的 ObjectURL，防止浏览器运行久了爆内存
+                    if (userUrls[userId]) {
+                        URL.revokeObjectURL(userUrls[userId]);
+                        delete userUrls[userId];
+                    }
+
+                    // 3. 从在线名单中彻底注销
+                    activeUsers.delete(userId);
+                    delete lastUpdateTime[userId];
+                    
+                    console.log(`[SYSTEM] User: ${userId} offline. Card removed.`);
+                }
+            }
+            updateUserCount(); // 刷新在线人数显示
+        }, 2000);
+
+        function updateUserCard(userId, imgUrl) {
+            let card = document.getElementById(`user-card-${userId}`);
+            const timeStr = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+            if (!card) {
+                card = document.createElement('div');
+                card.id = `user-card-${userId}`;
+                card.className = 'user-card';
+                card.innerHTML = `
+                    <div class="user-header">
+                        <span>${userId}</span>
+                        <span id="user-time-${userId}" class="user-time">${timeStr}</span>
+                    </div>
+                    <img id="user-img-${userId}" src="${imgUrl}" alt="Stream">
+                `;
+                gridContainer.appendChild(card);
+            } else {
+                document.getElementById(`user-img-${userId}`).src = imgUrl;
+                document.getElementById(`user-time-${userId}`).textContent = timeStr;
+            }
+        }
+
+        function appendTranscript(userId, timeStr, text) {
+            const item = document.createElement('div');
+            item.className = 'transcript-item';
+            item.innerHTML = `
+                <div class="item-meta">
+                    <span class="item-user">${userId}</span>
+                    <span>${timeStr}</span>
+                </div>
+                <div>${text}</div>
+            `;
+            transcriptList.appendChild(item);
+            transcriptList.scrollTop = transcriptList.scrollHeight; 
+        }
+
+        function updateUserCount() {
+            userCountSpan.textContent = `在线人数: ${activeUsers.size}`;
+        }
+
+        summaryBtn.addEventListener('click', async () => {
+            const apiKey = apiKeyInput.value.trim();
+            if (!apiKey) {
+                alert("请先在右上方输入对应的 API Key 才能调用大模型总结服务！");
+                return;
+            }
+
+            if (meetingTranscripts.length === 0) {
+                alert("当前会议还没有任何发言记录，请先通过手机进行语音发送再总结。");
+                return;
+            }
+
+            summaryBtn.disabled = true;
+            summaryBtn.textContent = "AI 正在分析并整理中...";
+            summaryContent.textContent = "AI 秘书正在为您撰写纪要，大约需要几秒钟...";
+
+            const transcriptPrompt = meetingTranscripts.map(item => `[${item.time}] ${item.user}: ${item.text}`).join('\n');
+
+            const provider = aiProviderSelect.value;
+            let apiEndpoint = "";
+            let apiModel = "";
+            
+            if (provider === "deepseek") {
+                apiEndpoint = "https://api.deepseek.com/chat/completions"; 
+                apiModel = "deepseek-chat";                              
+            } else if (provider === "openai") {
+                apiEndpoint = "https://api.openai.com/v1/chat/completions";
+                apiModel = "gpt-4o-mini";                                 
+            }
+
+            try {
+                const response = await fetch(apiEndpoint, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiKey}`
+                    },
+                    body: JSON.stringify({
+                        model: apiModel,
+                        messages: [
+                            { 
+                                role: "system", 
+                                content: `你是一位极为专业、高效的会议秘书。请将用户发给你的会议发言记录整理成格式工整的会议纪要。
+需要按以下模块组织结构：
+### 📌 1. 会议核心议题
+### 💬 2. 各参会人核心发言提炼 (提取每个 User 的核心论点)
+### 🤝 3. 达成的一致决议
+### 📋 4. 后续待办与分工
+注意：请保持回答客观简洁，排版美观，使用标准的 Markdown 格式。`
+                            },
+                            { 
+                                role: "user", 
+                                content: `以下是今天的会议速记文本：\n\n${transcriptPrompt}` 
+                            }
+                        ],
+                        temperature: 0.5
+                    })
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP 错误！状态码: ${response.status}`);
+                }
+
+                const result = await response.json();
+                
+                if (result.choices && result.choices[0] && result.choices[0].message) {
+                    const aiSummary = result.choices[0].message.content;
+                    summaryContent.textContent = aiSummary; 
+                } else {
+                    summaryContent.textContent = "AI 返回数据解析异常，请稍后重试。";
+                }
+
+            } catch (err) {
+                console.error(err);
+                summaryContent.textContent = "调用 AI 接口失败: " + err.message + "\n\n请检查 API Key 填写是否正确，或者网络是否能够正常访问大模型官网。";
+            } finally {
+                summaryBtn.disabled = false;
+                summaryBtn.textContent = "一键生成 AI 会议摘要";
+            }
+        });
+    </script>
+</body>
+</html>
